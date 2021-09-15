@@ -18,11 +18,43 @@ import shutil
 import h5py
 import json
 import numpy as np
+from scipy import constants as C
 
 import pandas as pd
 from cdflib.epochs import CDFepoch
 from bs4 import BeautifulSoup
 import pickle
+
+from paramiko import SSHClient
+from scp import SCPClient
+
+
+class Connection(object):
+    
+    def __init__(self, hostname="localhost", port = 1247, username="shibaji", password="virginia@1"):
+        self.hostname = hostname
+        self.port = port
+        self.username = username
+        self.password = password
+        self.con = False
+        self._conn_()
+        return
+    
+    def _conn_(self):
+        """ Create Conn """
+        self.ssh = SSHClient()
+        self.ssh.load_system_host_keys()
+        self.ssh.connect(hostname=self.hostname, port = self.port, username=self.username, password=self.password)
+        self.scp = SCPClient(self.ssh.get_transport())
+        self.con = True
+        return
+    
+    def _close_(self):
+        """ Close connection """
+        if self.con:
+            self.scp.close()
+            self.ssh.close()
+        return
 
 class CDFLoader(object):
     
@@ -128,7 +160,7 @@ class SpectralInfo(CDFLoader):
         super().__init__(dates, params=params, localDir=localDir, file_kind=file_kind)
         return
     
-    def get_dataset(self, keys=["BuBu", "BvBv", "BwBw", "EuEu", "EvEv", "EwEw"], WFR_file_id=0):
+    def get_dataset(self, keys=["BuBu", "BvBv", "BwBw"], WFR_file_id=0):
         return self.get_dataset_raw(keys, WFR_file_id, verbose=False)
     
     def get_WFR_info(self, file_id=0):
@@ -153,7 +185,7 @@ class LocationInfo(object):
     """ Extract MagEphem data and store """
     
     def __init__(self, dates, params={"sc":"a"}, baseUrl="http://emfisis.physics.uiowa.edu/Flight/RBSP-{sc}/LANL/MagEphem/{year}/", 
-                 localDir="tmp/EMFISIS/", fname="rbspa_def_MagEphem_OP77Q_{date}_v3.0.0.h5"):
+                 localDir="tmp/EMFISIS/", fname="rbsp{scm}_def_MagEphem_OP77Q_{date}_v3.0.0.h5"):
         """
         Download CDF files from the server.
         
@@ -166,8 +198,9 @@ class LocationInfo(object):
         self.dates = dates
         self.url = baseUrl + fname
         self.fname = fname
-        self.files = [localDir + "%s/"%d.strftime("%Y%m%d") + self.fname.format(date=d.strftime("%Y%m%d")) for d in dates]
-        self.urls = [self.url.format(year=d.strftime("%Y"), date=d.strftime("%Y%m%d"), 
+        self.files = [localDir + "%s/"%d.strftime("%Y%m%d") + self.fname.format(date=d.strftime("%Y%m%d"), scm=params["sc"])
+                      for d in dates]
+        self.urls = [self.url.format(year=d.strftime("%Y"), date=d.strftime("%Y%m%d"), scm=params["sc"], 
                                                   sc=params["sc"].upper()) for d in dates]
         self.localDir = localDir
         self.file_objects = []
@@ -206,8 +239,10 @@ class LocationInfo(object):
         print(" Describe location dataset-", "\n", st)
         return self
     
-    def extract_data(self, keys=["L", "Lstar", "UTC"]):
-        self.describe()
+    def extract_data(self, keys=["L", "Lstar", "UTC", "Bmin_gsm", 
+                                 "CDMAG_MLAT", "CDMAG_MLON", "CDMAG_MLT", 
+                                 "CDMAG_R"], describe=False):
+        if describe: self.describe()
         params = {}
         for d, f in zip(self.dates, self.file_objects):
             for key in f.keys():
@@ -227,17 +262,24 @@ class LocationInfo(object):
             shutil.rmtree(d)
         return
     
-class DownloadEMFISIS(object):
+class DownloadSC(object):
     
     def __init__(self, dates, params={"sc":"a", "lev":"L2"}, localDir="tmp/EMFISIS/", clean=True):
         self.dates = dates
         self.params = params
         self.localDir = localDir
-        self.files = [localDir + "%s.pickle"%d.strftime("%Y%m%d") for d in dates]
+        self.files = [localDir + "%s_%s.pickle"%(d.strftime("%Y%m%d"), params["sc"].upper()) for d in dates]
         self.cln = clean
         self.outs = {}
+        self.units = [{"name": "pT", "value": 1e-12}]
         return
     
+    def reset_params(self, params):
+        self.outs = {}
+        self.params = params
+        self.files = [self.localDir + "%s_%s.pickle"%(d.strftime("%Y%m%d"), params["sc"].upper()) for d in dates]
+        return self
+        
     def download(self):
         for d, f in zip(self.dates, self.files):
             if os.path.exists(f):
@@ -249,6 +291,7 @@ class DownloadEMFISIS(object):
                 a = {}
                 a["LocationInfo"] = self.li.fetch().extract_data()
                 a["SpectralData"] = self.si.fetch().get_dataset()
+                a["params"] = self.params
                 with open(f, "wb") as h: pickle.dump(a, h, protocol=pickle.HIGHEST_PROTOCOL)
                 self.outs[d] = a
                 if self.cln: self.clean()
@@ -258,61 +301,99 @@ class DownloadEMFISIS(object):
         self.li.clean()
         return
     
-    def spectral_to_BField(self, d=None, flim=[100,2000]):
-        if d == None: d = self.dates[0]
-        loc = self.outs[d]["LocationInfo"]
-        loc["L"], loc["Lstar"] = np.array(loc["L"]), np.array(loc["Lstar"])
-        loc["L"][loc["L"] < 0], loc["Lstar"][loc["Lstar"] < 0] = np.nan, np.nan
-        _l = pd.DataFrame()
-        _l["L"], _l["Lstar"], _l["epoch"] = np.nanmedian(loc["L"], axis=1), np.nanmedian(loc["Lstar"], axis=1), loc["UTC"]
-        _l = _l.set_index("epoch").resample("3s").interpolate().reset_index()
-        spec = self.outs[d]["SpectralData"]
-        b2_psd = spec["BuBu"] + spec["BvBv"] + spec["BwBw"]
-        epoch = spec["Epoch"]
-        freq = spec["WFR"]["frequencies"]
-        o = pd.DataFrame()
-        B = []
-        unit = {"name": "pT", "value": 1e-12}
-        for i in range(b2_psd.shape[0]):
-            o["freq"] = np.copy(freq)
-            o["psd"] = np.copy(b2_psd[i,:])
-            o = o[(o.freq>=flim[0]) & (o.freq<=flim[1])]
-            b = 1e3*np.sqrt(np.trapz(o.psd, x=o.freq))
-            B.append(b)
-            o = o[0:0]
-        _l = _l[(_l.epoch>=epoch[0]) & (_l.epoch<=epoch[-1])]
-        o = pd.DataFrame()
-        o["B(pT)"], o["epoch"], o["L"], o["Lstar"] = B, epoch, np.copy(_l.L)[::2], np.copy(_l.Lstar)[::2]
-        print(o.head())
-        return o, unit
+    def spectral_to_BField(self, flims=None):
+        """
+        For Hiss: flims = [{"max":2000, "min":100}]
+        """
+        con = Connection()
+        for d in self.dates:
+            fname = self.localDir + "%s_%s.csv"%(d.strftime("%Y%m%d"), self.params["sc"].upper())
+            if os.path.exists(fname):
+                print(" Loading from - ", fname)
+                o = pd.read_csv(fname, parse_dates=["epoch"])
+            else:
+                loc = self.outs[d]["LocationInfo"]
+                fce = 1e-9*np.array(loc["Bmin_gsm"])[:, 3] * C.e / (2*C.pi * C.m_e)
+                loc["L"], loc["Lstar"] = np.array(loc["L"]), np.array(loc["Lstar"])
+                loc["L"][loc["L"] < 0], loc["Lstar"][loc["Lstar"] < 0] = np.nan, np.nan
+                _l = pd.DataFrame()
+                _l["L"], _l["Lstar"], _l["epoch"], _l["fce"] = np.nanmedian(loc["L"], axis=1),\
+                                np.nanmedian(loc["Lstar"], axis=1), loc["UTC"], fce
+                _l["CDMAG_MLAT"], _l["CDMAG_MLON"], _l["CDMAG_MLT"], _l["CDMAG_R"] = loc["CDMAG_MLAT"],\
+                                loc["CDMAG_MLON"], loc["CDMAG_MLT"], loc["CDMAG_R"]
+                _l = _l.set_index("epoch").resample("3s").interpolate().reset_index()
+                spec = self.outs[d]["SpectralData"]
+                b2_psd = spec["BuBu"] + spec["BvBv"] + spec["BwBw"]
+                epoch = spec["Epoch"]
+                freq = spec["WFR"]["frequencies"]
+                o = pd.DataFrame()
+                B, L, Lstar, CDMAG_MLAT, CDMAG_MLON, CDMAG_MLT, CDMAG_R = [], [], [], [], [], [], []
+                for i in range(b2_psd.shape[0]):
+                    o["freq"] = np.copy(freq)
+                    o["psd"] = np.copy(b2_psd[i,:])
+                    b = 0.
+                    if flims is None:
+                        f = _l[_l.epoch==epoch[i]]
+                        if len(f) > 0:
+                            fce = f.fce.tolist()[0]
+                            ox = o[(o.freq>=0.1*fce) & (o.freq<=0.9*fce)]
+                            b += 1e3*np.sqrt(np.trapz(ox.psd, x=ox.freq))
+                            L.append(f.L.tolist()[0])
+                            Lstar.append(f.Lstar.tolist()[0])
+                            CDMAG_MLAT.append(f.CDMAG_MLAT.tolist()[0])
+                            CDMAG_MLON.append(f.CDMAG_MLON.tolist()[0])
+                            CDMAG_MLT.append(f.CDMAG_MLT.tolist()[0])
+                            CDMAG_R.append(f.CDMAG_R.tolist()[0])
+                        else:
+                            L.append(np.nan)
+                            Lstar.append(np.nan)
+                            CDMAG_MLAT.append(np.nan)
+                            CDMAG_MLON.append(np.nan)
+                            CDMAG_MLT.append(np.nan)
+                            CDMAG_R.append(np.nan)
+                    else:
+                        for flim in flims:
+                            ox = o[(o.freq>=flim["min"]) & (o.freq<=flim["max"])]
+                            b += 1e3*np.sqrt(np.trapz(ox.psd, x=ox.freq))
+                    B.append(b)
+                    o = o[0:0]
+                o = pd.DataFrame()
+                o["B(pT)"], o["epoch"], o["L"], o["Lstar"] = B, epoch, L, Lstar
+                o["CDMAG_MLAT"], o["CDMAG_MLON"], o["CDMAG_MLT"], o["CDMAG_R"] = CDMAG_MLAT, CDMAG_MLON, CDMAG_MLT, CDMAG_R
+                o["SAT"] = self.params["sc"].upper()
+                o.to_csv(fname, index=False, header=True)
+                print(" Local extraction done - ", d)
+                # Run remote conversion in Python 2.7
+                stdin, stdout, stderr = con.ssh.exec_command("cd CodeBase/Bayesian_Framework_CRRES/ "\
+                                "\n python src/lgmpy2.py {f}".format(f=fname), get_pty=True)
+                for line in iter(stdout.readline, ""):
+                    print(line, end="")
+                o = pd.read_csv(fname, parse_dates=["epoch"])
+            print(o.head())        
+        # End remote connections
+        con._close_()
+        return self
     
-    def create_wave_data(self):
-        epoch, Bw, _L, _Ls, L, Ls, utc = [], [], [], [], [], [], []
-        for o in self.outs:
-            _l, _ls = np.array(o["LocationInfo"]["L"]), np.array(o["LocationInfo"]["Lstar"])
-            _l[_l<0], _ls[_ls<0] = np.nan, np.nan
-            _l, _ls = np.nanmax(_l, axis=1), np.nanmax(_ls, axis=1)
-            _L.extend(_l)
-            _Ls.extend(_ls)
-            print(np.array(o["WaveData"]["BwSamples"]).max(), np.array(o["WaveData"]["BwSamples"]).min(),
-                  np.array(o["LocationInfo"]["L"]).shape)
-            Bw.extend((1000*np.array(o["WaveData"]["BwSamples"]).max(axis=1)).tolist())
-            epoch.extend([e.replace(second=0) for e in o["WaveData"]["Epoch"]])
-            utc.extend(o["LocationInfo"]["UTC"])
-        L = [_L[utc.index(e)] for e in epoch]
-        Ls = [_Ls[utc.index(e)] for e in epoch]
-        return (epoch, L, Ls, Bw)
+    def merge_satellites(self):
+        sats = ["a", "b"]
+        for d in dates:
+            fname = self.localDir + "%s.csv"%(d.strftime("%Y%m%d"))
+            u = pd.DataFrame()
+            for sat in sats:
+                f = self.localDir + "%s_%s.csv"%(d.strftime("%Y%m%d"), sat.upper())
+                if os.path.exists(f): u = pd.concat([u, pd.read_csv(f)])
+            u.to_csv(fname, index=False, header=True)
+        return
 
+def download_dataset(dates, localDir="tmp/EMFISIS/"):
+    params = {"sc":"a", "lev":"L2"}
+    d = DownloadSC(dates, params, localDir)
+    d.download().spectral_to_BField().reset_params({"sc":"b", "lev":"L2"})
+    d.download().spectral_to_BField()
+    d.merge_satellites()
+    return
     
-
 if __name__ == "__main__":
-    dates = [dt.datetime(2012,10,6)+dt.timedelta(i) for i in range(1)]
-    dwl = DownloadEMFISIS(dates)
-    dwl.download()
-    #dwl.spectral_to_BField()
-    #d = dwl.create_wave_data()
-    #from plotlib import WaveTimePlot as WTP
-    #wti = WTP(d[0], 1)
-    #wti.addParamPlot(d[0], d[2], d[3], ylabel="L*")
-    #wti.save("out.png")
+    dates = [dt.datetime(2012,10,6)+dt.timedelta(i) for i in range(5)]
+    download_dataset(dates)
     pass

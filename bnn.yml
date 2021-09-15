@@ -1,6 +1,7 @@
 name: bnn
 channels:
   - anaconda
+  - conda-forge
   - defaults
 dependencies:
   - blas=1.0=mkl
@@ -79,6 +80,7 @@ dependencies:
   - zstd=1.4.5=h9ceee32_0
   - pip:
     - attrs==20.3.0
+    - bcrypt==3.2.0
     - beautifulsoup4==4.9.3
     - bs4==0.0.1
     - cdflib==0.3.20
@@ -86,5 +88,8 @@ dependencies:
     - h5py==3.3.0
     - lxml==4.6.3
     - networkx==2.5.1
+    - paramiko==2.7.2
+    - pynacl==1.4.0
     - scipy==1.7.0
+    - scp==0.14.1
     - soupsieve==2.2.1
