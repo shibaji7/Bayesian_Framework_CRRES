@@ -16,6 +16,8 @@ import matplotlib.dates as mdates
 from matplotlib.dates import DateFormatter, num2date
 from matplotlib import patches
 import matplotlib.patches as mpatches
+from matplotlib.dates import date2num
+import datetime as dt
 
 import pandas as pd
 
@@ -28,7 +30,7 @@ class FrequencyTimePlot(object):
         self.WFR = WFR
         self.num_subplots = num_subplots
         self._num_subplots_created = 0
-        fig_title = fig_title.format(date=dates[0].strftime("%Y-%m-%d"))
+        fig_title = fig_title.format(date=self.dates[0].strftime("%Y-%m-%d"))
         self.fig = plt.figure(figsize=(8, 3*self.num_subplots), dpi=100) # Size for website
         plt.suptitle(fig_title, x=0.9, y=0.95, ha="right", fontweight="bold", fontsize=12)
         mpl.rcParams.update({"font.size": 10})
@@ -100,7 +102,7 @@ def get_gridded_parameters(q, xparam="x", yparam="y", zparam="z"):
     """
     plotParamDF = q[ [xparam, yparam, zparam] ]
     plotParamDF[xparam] = plotParamDF[xparam].tolist()
-    plotParamDF[yparam] = plotParamDF[yparam].tolist()
+    plotParamDF[yparam] = np.round(plotParamDF[yparam].tolist(), 1)
     plotParamDF = plotParamDF.groupby( [xparam, yparam] ).mean().reset_index()
     plotParamDF = plotParamDF[ [xparam, yparam, zparam] ].pivot( xparam, yparam )
     x = plotParamDF.index.values
@@ -112,7 +114,7 @@ def get_gridded_parameters(q, xparam="x", yparam="y", zparam="z"):
             plotParamDF[zparam].values)
     return X,Y,Z
     
-class WaveTimePlot(object):
+class RangeTimePlot(object):
     """
     Create plots for wave datasets.
     """
@@ -121,14 +123,15 @@ class WaveTimePlot(object):
         self.dates = dates
         self.num_subplots = num_subplots
         self._num_subplots_created = 0
-        fig_title = fig_title.format(date=dates[0].strftime("%Y.%m.%d") + "-" + dates[-1].strftime("%m.%d"))
-        self.fig = plt.figure(figsize=(8, 3*self.num_subplots), dpi=100) # Size for website
+        fig_title = fig_title.format(date=self.dates[0].strftime("%Y.%m.%d") + "-" + self.dates[-1].strftime("%m.%d"))
+        self.fig = plt.figure(figsize=(8, 3*self.num_subplots), dpi=150) # Size for website
         plt.suptitle(fig_title, x=0.9, y=0.95, ha="right", fontweight="bold", fontsize=12)
         mpl.rcParams.update({"font.size": 10})
         return
     
-    def addParamPlot(self, x, y, z, title="", vmax=1e0, vmin=1e2, steps=3, cmap = plt.cm.Spectral_r, xlabel="Time UT",
-                     ylabel="L", label=r"$B_w$[pT]", ax=None, fig=None, add_colbar=True):
+    def addParamPlot(self, x, y, z, title="", vmax=1e2, vmin=1e0, steps=3, cmap = plt.cm.Spectral_r, xlabel="Time UT",
+                     ylabel="L", label=r"$B_{chorus}$[pT]", ax=None, fig=None, add_colbar=True, 
+                     interpolate_params={"dt":"1T"}):
         if fig is None: fig = self.fig
         if ax is None: ax = self._add_axis()
         if vmax is None: vmax = Z.max()
@@ -137,16 +140,19 @@ class WaveTimePlot(object):
         cmap.set_bad("w", alpha=0.0)
         df = pd.DataFrame()
         df["x"], df["y"], df["z"] = x, y, z
-        df = df.set_index("x").resample("1T").interpolate().reset_index()
+        df = df.set_index("x").resample(interpolate_params["dt"]).max().reset_index()
+        df["x"] = df.x.apply(lambda k: date2num(k))
         X, Y, Z = get_gridded_parameters(df)
         # Configure axes
-        ax.xaxis.set_major_formatter(DateFormatter(r"%m-%d"))
-        hours = mdates.HourLocator(byhour=[0])
-        ax.xaxis.set_major_locator(hours)
+        ax.xaxis.set_major_formatter(DateFormatter(r"$%d$"))
+        ax.xaxis.set_minor_formatter(DateFormatter(r"$%H^{%M}$"))
+        hours = mdates.HourLocator(byhour=[12])
+        ax.xaxis.set_minor_locator(hours)
         ax.set_xlabel(xlabel, fontdict={"size":12})
         ax.set_ylabel(ylabel, fontdict={"size":12})
-        ax.set_xlim([self.dates[0], self.dates[-1]])
-        ax.pcolormesh(X, Y, Z.T, lw=1, edgecolors="None", cmap=cmap, norm=norm)
+        ax.set_xlim([self.dates[0], self.dates[-1]+dt.timedelta(1)])
+        ax.set_ylim(1.5, 6.5)
+        ax.pcolormesh(X, Y, Z.T, lw=4., edgecolors="None", cmap=cmap, norm=norm)
         if add_colbar: self._add_colorbar(fig, ax, norm, cmap, label=title+" "+label)
         ax.set_title(title, loc="left")
         return

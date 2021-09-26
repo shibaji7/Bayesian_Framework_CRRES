@@ -33,6 +33,6 @@ f = sys.argv[1]
 if os.path.exists(f):
     o = pd.read_csv(f, parse_dates=["epoch"])
     o = o.apply(convert_cdmag_gsm, axis=1)
-    keys = ["epoch", "SAT", "L", "Lstar", "R", "MLAT", "MLON", "MLT", "CDMAG_R", "CDMAG_MLAT", "CDMAG_MLON", "CDMAG_MLT", "B(pT)"] 
+    keys = ["epoch", "SAT", "L", "Lstar", "R", "MLAT", "MLON", "MLT", "Fce", "Bl(pT)", "Bu(pT)", "B(pT)"] 
     o[keys].to_csv(f, index=False, header=True, float_format="%.3f")
 else: print(" File not exists - ", f)
