@@ -29,6 +29,8 @@ import pickle
 from paramiko import SSHClient
 from scp import SCPClient
 
+import dump_data as dmap
+
 
 class Connection(object):
     
@@ -433,13 +435,33 @@ class DataLoader(object):
             o = pd.concat([f, o]).reset_index(drop = True)
         o = o.reset_index()
         o.drop(columns=["index"], inplace=True)
-        self.o = o.copy()
+        self.frame = o.copy()
+        dmap.download_omni_dataset(self.dates)
         return
     
     def _filter_(self, sc=None, dates=None, mlt=None, mlat=None):
-        if sc is not None: self.o = self.o[self.o.SAT == sc]
-        if (dates is not None) and (len(dates) == 2): self.o = self.o[(self.o.epoch >= dates[0]) & (self.o.epoch < dates[1])]
-        return
+        o = self.frame.copy()
+        if sc is not None: o = o[o.SAT == sc]
+        if (dates is not None) and (len(dates) == 2): o = o[(o.epoch >= dates[0]) & (o.epoch < dates[1])]
+        return o
+    
+    def parsed_min_segmented_data(self, scs = ["A", "B"], interpolate_params={"dt":"1T"}, 
+                                  omni_params=["AE"], to_csv={"save":True, "localDir":"tmp/"}):
+        omni = dmap.get_omni_dataset(self.dates)[["DATE"]+omni_params]
+        omni = omni.rename(columns={"DATE":"epoch"})
+        omni = omni[(omni.epoch>=self.dates[0]) & (omni.epoch<self.dates[-1]+dt.timedelta(1))]
+        o = pd.DataFrame()
+        for sc in scs:
+            _o = self._filter_(sc=sc)
+            _o = _o.set_index("epoch").resample(interpolate_params["dt"]).max().reset_index()
+            for p in omni_params:
+                _o[p] = omni[p].tolist()
+            o = pd.concat([o, _o])
+        o = o.reset_index().drop(columns=["index"])
+        if to_csv and to_csv["save"]: 
+            fname = to_csv["localDir"] + "%s_%s.csv"%(self.dates[0].strftime("%Y%m%d"), self.dates[-1].strftime("%Y%m%d"))
+            o.to_csv(fname, index=False, header=True, float_format="%g")
+        return o
     
 if __name__ == "__main__":
     dates = [dt.datetime(2012,10,6) + dt.timedelta(i) for i in range(5)]
