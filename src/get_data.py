@@ -16,6 +16,7 @@ import requests
 import datetime as dt
 import shutil
 import h5py
+from netCDF4 import Dataset, date2num as d2n
 import json
 import numpy as np
 from scipy import constants as C
@@ -307,10 +308,35 @@ class DownloadSC(object):
         self.li.clean()
         return
     
-    def spectral_to_BField(self, flims=None):
+    def spectral_to_BField_HISS(self, d=None, flim={"max":2000, "min":100}):
         """
         For Hiss: flims = [{"max":2000, "min":100}]
         """
+        if d is None: d = self.dates[0]
+        loc = self.outs[d]["LocationInfo"]
+        loc["L"], loc["Lstar"] = np.array(loc["L"]), np.array(loc["Lstar"])
+        loc["L"][loc["L"] < 0], loc["Lstar"][loc["Lstar"] < 0] = np.nan, np.nan
+        _l = pd.DataFrame()
+        _l["L"], _l["Lstar"], _l["epoch"] = np.nanmedian(loc["L"], axis=1), np.nanmedian(loc["Lstar"], axis=1), loc["UTC"]
+        _l = _l.set_index("epoch").resample("6s").interpolate().reset_index()
+        _l.drop(_l.tail(1).index,inplace=True)
+        spec = self.outs[d]["SpectralData"]
+        b2_psd = spec["BuBu"] + spec["BvBv"] + spec["BwBw"]
+        epoch = spec["Epoch"]
+        freq = spec["WFR"]["frequencies"]
+        o = pd.DataFrame()
+        _dic_ = {"epoch": epoch, "frames":[], "freqs": [], "L":np.array(_l.L), "Lstar":np.array(_l.Lstar)}
+        for i in range(b2_psd.shape[0]):
+            o["freq"] = np.copy(freq)
+            o["psd"] = np.copy(b2_psd[i,:])
+            ox = o[(o.freq>=flim["min"]) & (o.freq<=flim["max"])]
+            if i == 0: _dic_["freqs"] = np.copy(ox.freq)
+            _dic_["frames"].append(ox.psd.tolist())
+            o = o[0:0]
+        _dic_["frames"] = np.array(_dic_["frames"])
+        return _dic_
+    
+    def spectral_to_BField(self, flims=None):
         def integrate_b(t, l, u):
             ox = t[(t.freq>=l) & (t.freq<=u)]
             m = 1e3*np.sqrt(np.trapz(ox.psd, x=ox.freq))
@@ -462,6 +488,52 @@ class DataLoader(object):
             fname = to_csv["localDir"] + "%s_%s.csv"%(self.dates[0].strftime("%Y%m%d"), self.dates[-1].strftime("%Y%m%d"))
             o.to_csv(fname, index=False, header=True, float_format="%g")
         return o
+
+def get_fetch_hiss_data(dates, fname):
+    if not os.path.exists(fname):
+        ds = DownloadSC(dates, localDir="tmp/HISS/", clean=True, v=False)
+        ds.download()
+        epoch, frames, freqs, L, Lstar = [], [], [], [], []
+        ddates = []
+        for i, d in enumerate(dates):
+            _dic_ = ds.spectral_to_BField_HISS(d)
+            if i == 0: freqs = _dic_["freqs"]
+            if (len(_dic_["epoch"]) == 14400) and (len(_dic_["Lstar"]) == 14400) and\
+                    (len(_dic_["L"]) == 14400) and (len(_dic_["freqs"]) == 27) and\
+                    (_dic_["frames"].shape == (14400, 27)):
+                epoch.extend(_dic_["epoch"])
+                L.extend(_dic_["L"].tolist())
+                Lstar.extend(_dic_["Lstar"].tolist())
+                frames.append(_dic_["frames"])
+                ddates.append(d)
+        nds = Dataset(fname, "w", format="NETCDF4")
+        nds.createDimension("epoch", len(epoch))
+        nds.createDimension("freqs", len(freqs))
+        nds.createDimension("dates", len(ddates))
+        
+        dunits = nds.createVariable("dunits", "f8", ("dates",))
+        dunits.units = "hours since 1970-01-01 00:00:00.0"
+        dunits.calendar = "julian"
+        dunits[:] = d2n(ddates,units=dunits.units,calendar=dunits.calendar)
+        
+        time = nds.createVariable("time", "f8", ("epoch",))
+        time.units = "hours since 1970-01-01 00:00:00.0"
+        time.calendar = "julian"
+        time[:] = d2n(epoch,units=time.units,calendar=time.calendar)
+        
+        nfreqs = nds.createVariable("freqs","f4",("freqs",))
+        nfreqs[:] = freqs
+        
+        nL = nds.createVariable("L","f4",("epoch",))
+        nLstar = nds.createVariable("Lstar","f4",("epoch",))
+        nL[:], nLstar[:] = L, Lstar
+        
+        B = nds.createVariable("B_hiss", "f8", ("epoch","freqs"))
+        B[:] = np.vstack(tuple(frames))
+        
+        nds.close()
+    nds = Dataset(fname)
+    return nds
     
 if __name__ == "__main__":
     dates = [dt.datetime(2012,10,6) + dt.timedelta(i) for i in range(5)]
