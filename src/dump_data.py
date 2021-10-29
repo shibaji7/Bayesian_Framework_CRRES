@@ -77,4 +77,33 @@ def get_omni_dataset(dates, tmpdir="tmp/EMFISIS/"):
     for file in files:
         if os.path.exists(file): o = pd.concat([o, pd.read_csv(file, parse_dates=["DATE"])])
     return o
+
+def fetch_Kp_data(dates, tmpdir="tmp/EMFISIS/"):
+    base_storage = tmpdir + "omni/Kp_raw.csv"
+    fname = tmpdir + "omni/Kp.csv"
+    url = "http://www-app3.gfz-potsdam.de/kp_index/Kp_ap_since_1932.txt"
+    o = []
+    if not os.path.exists(base_storage): os.system(f"wget -O {base_storage} {url}")
+    if not os.path.exists(fname):
+        with open(base_storage, "r") as f: lines = f.readlines()[30:]
+        header = []
+        for i, l in enumerate(lines):
+            l = list(filter(None, l.replace("#", "").replace("\n", "").split(" ")))
+            x = dict(
+                date = dt.datetime.strptime(l[0]+l[1]+l[2], "%Y%m%d") + dt.timedelta(hours=float(l[3])),
+                date_m = dt.datetime.strptime(l[0]+l[1]+l[2], "%Y%m%d") + dt.timedelta(hours=float(l[4])),
+                Kp = float(l[7])
+            )
+            o.append(x)
+        o = pd.DataFrame.from_records(o)
+        o.to_csv(fname, index=False, header=True)
+    else: o = pd.read_csv(fname, parse_dates=["date", "date_m"])
+    dx = pd.DataFrame()
+    for d in dates:
+        x = o[(o.date>=d) & (o.date<=d+dt.timedelta(1))]
+        x = x.set_index("date").resample("6s").ffill().reset_index()
+        x.drop(x.tail(1).index,inplace=True)
+        dx = pd.concat([dx, x])
+    dx = dx.reset_index().drop(columns=["index"])
+    return dx
     
